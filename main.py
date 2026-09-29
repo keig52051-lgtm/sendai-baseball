@@ -74,26 +74,40 @@ async def main():
             date_display = f"{item['date_str']}({item['weekday']}) {item['note']}".strip()
             print(f"[{date_display}] を確認中...", end="", flush=True)
             try:
+                # 1. 毎回トップURLにアクセス
                 await page.goto("https://www.cm2.epss.jp/sendai/web/view/user/c019RsvEmptyState.html", timeout=60000)
-                await page.wait_for_load_state("networkidle")
+                await page.wait_for_load_state("domcontentloaded")
 
-                target_link = page.locator("text=野球, text=空き状況, a:has-text('野球')").first
-                await target_link.wait_for(state="visible", timeout=15000)
-                await target_link.click()
-                await page.wait_for_load_state("networkidle")
+                # 2. 野球カテゴリの選択（あればクリック、無ければスキップして検索フォームへ）
+                try:
+                    baseball_btn = page.get_by_text("野球").first
+                    if await baseball_btn.is_visible(timeout=3000):
+                        await baseball_btn.click()
+                        await page.wait_for_load_state("domcontentloaded")
+                except Exception:
+                    pass
 
-                year_select = page.locator("select[name*='year'], select[id*='year']").first
-                await year_select.wait_for(state="visible", timeout=15000)
+                # 3. 日付セレクトボックスの設定
+                selects = await page.locator("select").all()
+                if len(selects) >= 3:
+                    await selects[0].select_option(value=item['year'])
+                    await selects[1].select_option(value=item['month'])
+                    await selects[2].select_option(value=item['day'])
+                else:
+                    await page.select_option("select[name*='year'], select[id*='year']", value=item['year'])
+                    await page.select_option("select[name*='month'], select[id*='month']", value=item['month'])
+                    await page.select_option("select[name*='day'], select[id*='day']", value=item['day'])
 
-                await year_select.select_option(value=item['year'])
-                await page.select_option("select[name*='month'], select[id*='month']", value=item['month'])
-                await page.select_option("select[name*='day'], select[id*='day']", value=item['day'])
+                # 4. 検索ボタンの実行
+                search_btn = page.locator("input[type='submit'], input[type='button'], button").filter(has_text="検索").first
+                if not await search_btn.is_visible():
+                    search_btn = page.locator("input[value*='検索']").first
 
-                search_btn = page.locator("input[type='submit'][value*='検索'], button:has-text('検索'), input[value*='検索']").first
                 await search_btn.click()
-                await page.wait_for_load_state("networkidle")
-                await asyncio.sleep(1.0)
+                await page.wait_for_load_state("domcontentloaded")
+                await asyncio.sleep(0.5)
 
+                # 5. 空き枠の解析
                 found_today = []
                 current_facility = ""
                 rows = await page.locator("table tr").all()
