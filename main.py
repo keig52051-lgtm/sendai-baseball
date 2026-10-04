@@ -1,42 +1,47 @@
 import asyncio
 import os
-import smtplib
-from email.message import EmailMessage
+import requests
 from datetime import date
 import calendar
 import jpholiday
 from playwright.async_api import async_playwright
 
-GMAIL_USER = os.environ.get("GMAIL_USER")
-GMAIL_APP_PASS = os.environ.get("GMAIL_APP_PASS")
-TO_EMAIL = os.environ.get("TO_EMAIL")
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_USER_ID = os.environ.get("LINE_USER_ID")
 
-def send_email_notification(vacancies):
-    if not vacancies:
+def send_line_notification(vacancies):
+    if not vacancies or not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID:
+        print("※ LINE通知をスキップしました (通知対象なし、またはLINEのToken/ID未設定)")
         return
-    msg = EmailMessage()
-    msg['Subject'] = f"【野球場 空き枠通知】仙台市施設予約 ({len(vacancies)}件の空き発見)"
-    msg['From'] = GMAIL_USER
-    msg['To'] = TO_EMAIL
 
-    body_lines = ["仙台市市民利用施設予約システムで、以下の野球場に空き枠が見つかりました。\n"]
+    message_text = f"【野球場 空き枠通知】\n仙台市施設予約で{len(vacancies)}件の空きが見つかりました！\n"
     current_date = ""
     for v in vacancies:
         if v['date'] != current_date:
             current_date = v['date']
-            body_lines.append(f"\n■ {current_date}")
-        body_lines.append(f"  ・【{v['facility']}】 時間枠: {v['time_slot']}")
+            message_text += f"\n■ {current_date}"
+        message_text += f"\n  ・【{v['facility']}】 {v['time_slot']}"
 
-    body_lines.append("\n\n※予約手続きはシステムへログインして行ってください。")
-    msg.set_content("\n".join(body_lines))
+    message_text += "\n\n▼予約ログインはこちら\nhttps://www.cm2.epss.jp/sendai/web/view/user/c019RsvEmptyState.html"
+
+    url = "https://api.line.me/v2/bot/message/push"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
+    }
+    payload = {
+        "to": LINE_USER_ID,
+        "messages": [{"type": "text", "text": message_text}]
+    }
 
     try:
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-            server.login(GMAIL_USER, GMAIL_APP_PASS)
-            server.send_message(msg)
-        print("★【成功】空き状況の通知メールを送信しました。")
+        res = requests.post(url, json=payload, headers=headers)
+        if res.status_code == 200:
+            print("★【成功】LINE通知を送信しました。")
+        else:
+            print(f"LINE送信失敗: Status {res.status_code}, {res.text}")
     except Exception as e:
-        print(f"メール送信エラー: {e}")
+        print(f"LINE送信エラー: {e}")
 
 def get_target_dates():
     today = date.today()
@@ -74,40 +79,41 @@ async def main():
             date_display = f"{item['date_str']}({item['weekday']}) {item['note']}".strip()
             print(f"[{date_display}] を確認中...", end="", flush=True)
             try:
-                # 1. 毎回トップURLにアクセス
+                # 1. ページ読み込み
                 await page.goto("https://www.cm2.epss.jp/sendai/web/view/user/c019RsvEmptyState.html", timeout=60000)
-                await page.wait_for_load_state("domcontentloaded")
+                await page.wait_for_load_state("networkidle")
 
-                # 2. 野球カテゴリの選択（あればクリック、無ければスキップして検索フォームへ）
+                # 2. 「野球」カテゴリの選択
                 try:
-                    baseball_btn = page.get_by_text("野球").first
+                    baseball_btn = page.locator("a, button, input").filter(has_text="野球").first
                     if await baseball_btn.is_visible(timeout=3000):
                         await baseball_btn.click()
-                        await page.wait_for_load_state("domcontentloaded")
+                        await page.wait_for_load_state("networkidle")
                 except Exception:
                     pass
 
-                # 3. 日付セレクトボックスの設定
+                # 3. ドロップダウン（select要素）が現れるまで最大10秒待機
+                await page.wait_for_selector("select", timeout=10000)
                 selects = await page.locator("select").all()
+
                 if len(selects) >= 3:
+                    # 画面上に存在する上から1番目・2番目・3番目のセレクトボックスを直接指定
                     await selects[0].select_option(value=item['year'])
                     await selects[1].select_option(value=item['month'])
                     await selects[2].select_option(value=item['day'])
                 else:
-                    await page.select_option("select[name*='year'], select[id*='year']", value=item['year'])
-                    await page.select_option("select[name*='month'], select[id*='month']", value=item['month'])
-                    await page.select_option("select[name*='day'], select[id*='day']", value=item['day'])
+                    # 万が一順番で取れない場合はインデックスで試行
+                    await page.select_option("select:nth-of-type(1)", value=item['year'])
+                    await page.select_option("select:nth-of-type(2)", value=item['month'])
+                    await page.select_option("select:nth-of-type(3)", value=item['day'])
 
-                # 4. 検索ボタンの実行
+                # 4. 検索ボタン押下
                 search_btn = page.locator("input[type='submit'], input[type='button'], button").filter(has_text="検索").first
-                if not await search_btn.is_visible():
-                    search_btn = page.locator("input[value*='検索']").first
-
                 await search_btn.click()
-                await page.wait_for_load_state("domcontentloaded")
-                await asyncio.sleep(0.5)
+                await page.wait_for_load_state("networkidle")
+                await asyncio.sleep(1)
 
-                # 5. 空き枠の解析
+                # 5. 結果テーブルの解析
                 found_today = []
                 current_facility = ""
                 rows = await page.locator("table tr").all()
@@ -156,7 +162,7 @@ async def main():
 
     print(f"\n全巡回完了: 計 {len(all_vacancies)} 件の空き枠を検知")
     if all_vacancies:
-        send_email_notification(all_vacancies)
+        send_line_notification(all_vacancies)
 
 if __name__ == "__main__":
     asyncio.run(main())
