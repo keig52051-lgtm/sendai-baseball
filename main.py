@@ -65,20 +65,35 @@ def get_target_dates():
     return target_dates
 
 async def parse_current_facility(page, date_display, default_name="野球場"):
-    """現在の画面から施設名を抽出し、空き枠テーブルを解析する"""
     time_slots = ["午前", "午後", "夕方", "夜間"]
     facility_name = ""
 
-    # 1. 画面全体のテキストから「〇〇野球場」「〇〇公園」等の施設名を正規表現で検索
+    # 1. 「館名」セルに隣接する値（例：西花苑公園野球場）をピンポイント取得
     try:
-        body_text = await page.locator("body").inner_text()
-        matches = re.findall(r'([一-龥ぁ-んァ-ヶa-zA-Z0-90-９\-_]{2,20}(?:野球場|公園野球場|グラウンド|運動場))', body_text)
-        for m in matches:
-            if "検索" not in m and "利用" not in m and "案内" not in m and "凡例" not in m:
-                facility_name = m.strip()
-                break
+        for label in ["館名", "施設名", "施設"]:
+            kan_cell = page.locator(f"th:has-text('{label}'), td:has-text('{label}')").first
+            if await kan_cell.is_visible(timeout=800):
+                # 隣接する td セルを取得
+                next_td = kan_cell.locator("xpath=following-sibling::td[1]")
+                if await next_td.count() > 0:
+                    txt = (await next_td.inner_text()).strip()
+                    if txt and len(txt) > 1 and "所在地" not in txt:
+                        facility_name = txt
+                        break
     except Exception:
         pass
+
+    # 2. バックアップ：正規表現検索
+    if not facility_name:
+        try:
+            body_text = await page.locator("body").inner_text()
+            matches = re.findall(r'([一-龥ぁ-んァ-ヶa-zA-Z0-90-９\-_]{2,20}(?:野球場|公園野球場|グラウンド|運動場))', body_text)
+            for m in matches:
+                if "検索" not in m and "利用" not in m and "案内" not in m and "凡例" not in m:
+                    facility_name = m.strip()
+                    break
+        except Exception:
+            pass
 
     if not facility_name:
         facility_name = default_name
@@ -97,7 +112,6 @@ async def parse_current_facility(page, date_display, default_name="野球場"):
                 c_text = await cell.inner_text()
                 c_html = await cell.inner_html()
 
-                # ×や予約不可がなく、可否用画像(img)が存在する場合
                 if "×" not in c_text and "予約不可" not in c_text and "<img" in c_html.lower():
                     if "hanrei" not in c_html.lower() and "legend" not in c_html.lower():
                         found.append({
@@ -155,54 +169,49 @@ async def main():
 
                 found_today_date = []
 
-                # 5. 施設切替ドロップダウンが存在するか判定
-                # 検索結果画面の施設選択ドロップダウン（年月日選択以外のselect要素）を探す
+                # 5. 施設巡回（ドロップダウンまたはページ送りボタン）
                 all_selects = await page.locator("select").all()
                 facility_select = None
-                
                 for sel in all_selects:
-                    options = await sel.locator("option").all_inner_texts()
-                    # オプション内に「野球場」「公園」「グラウンド」が含まれるドロップダウンを検出
-                    if any("野球" in opt or "公園" in opt or "グラウンド" in opt for opt in options):
-                        facility_select = sel
-                        break
+                    try:
+                        options = await sel.locator("option").all_inner_texts()
+                        if any("野球" in opt or "公園" in opt or "グラウンド" in opt for opt in options):
+                            facility_select = sel
+                            break
+                    except Exception:
+                        continue
 
                 if facility_select:
-                    # --- パターンA: ドロップダウン選択による全施設巡回 ---
                     options = await facility_select.locator("option").all()
                     for opt_idx in range(len(options)):
                         opt_elem = options[opt_idx]
                         opt_value = await opt_elem.get_attribute("value")
                         opt_text = (await opt_elem.inner_text()).strip()
 
-                        # 施設を選択
                         await facility_select.select_option(value=opt_value)
-                        
-                        # 変更ボタン/表示ボタンがあれば押下
                         change_btn = page.locator("input[value*='表示'], input[value*='変更'], button:has-text('表示'), button:has-text('変更')").first
                         if await change_btn.is_visible(timeout=800):
                             await change_btn.click()
-                        
+
                         await page.wait_for_load_state("domcontentloaded")
                         await asyncio.sleep(0.8)
 
-                        # 空き枠解析（ドロップダウンのテキストをデフォルト名として渡す）
                         v_list, f_name = await parse_current_facility(page, date_display, default_name=opt_text)
                         found_today_date.extend(v_list)
                 else:
-                    # --- パターンB: ページ送り/ボタンクリックによる全施設巡回 ---
                     for f_idx in range(15):
                         v_list, f_name = await parse_current_facility(page, date_display, default_name=f"野球場_{f_idx+1}")
                         found_today_date.extend(v_list)
 
-                        # 次へボタンの検索とクリック
+                        # ページ送りボタンを検出・クリック
                         next_clicked = False
-                        for selector in [
-                            "input[value*='次']", "button:has-text('次')",
-                            "a:has-text('次')", "a:has-text('次の施設')",
-                            "input[value*='館']", "button:has-text('館')",
-                            "a[href*='Next']"
-                        ]:
+                        next_selectors = [
+                            "input[value*='次']", "input[alt*='次']", "input[title*='次']",
+                            "button:has-text('次')", "a:has-text('次')", "a:has-text('次の施設')",
+                            "input[value*='館']", "button:has-text('館')", "a[href*='Next']", "a[href*='next']"
+                        ]
+
+                        for selector in next_selectors:
                             try:
                                 btn = page.locator(selector).first
                                 if await btn.is_visible(timeout=800):
@@ -215,9 +224,24 @@ async def main():
                                 continue
 
                         if not next_clicked:
+                            # 1回目のループでボタンが見つからなかった場合、画面上のボタン・リンク要素をデバッグログに出力
+                            if f_idx == 0 and item == target_dates[0]:
+                                try:
+                                    inputs = await page.locator("input, button, a").all()
+                                    input_info = []
+                                    for inp in inputs[:15]:
+                                        val = await inp.get_attribute("value") or ""
+                                        txt = await inp.inner_text() or ""
+                                        alt = await inp.get_attribute("alt") or ""
+                                        info = (val or txt or alt).strip().replace("\n", " ")
+                                        if info:
+                                            input_info.append(info)
+                                    print(f" [Debug:画面ボタン要素] {input_info[:8]}")
+                                except Exception:
+                                    pass
                             break
 
-                # 重複の除外
+                # 重複除外
                 seen = set()
                 unique_found = []
                 for f in found_today_date:
