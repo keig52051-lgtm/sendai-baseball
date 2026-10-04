@@ -77,7 +77,7 @@ async def main():
             date_display = f"{item['date_str']}({item['weekday']}) {item['note']}".strip()
             print(f"[{date_display}] を確認中...", end="", flush=True)
             try:
-                # 1. ページ読み込み
+                # 1. 施設予約トップページへアクセス
                 await page.goto("https://www.cm2.epss.jp/sendai/web/view/user/c019RsvEmptyState.html", timeout=60000)
                 await page.wait_for_load_state("domcontentloaded")
                 await asyncio.sleep(1)
@@ -94,7 +94,7 @@ async def main():
                     except Exception:
                         continue
 
-                # 3. 日付の指定
+                # 3. 日付選択
                 selects = page.locator("select")
                 if await selects.count() >= 3:
                     await selects.nth(0).select_option(value=item['year'])
@@ -112,42 +112,41 @@ async def main():
 
                 # 5. 施設名（球場名）の取得
                 facility_name = "野球場"
-                # 画面内の「館名」ラベルまたは「館内の施設一覧」から施設名を検索
-                facility_loc = page.locator("td:has-text('館名'), th:has-text('館名'), div:has-text('館名')")
-                if await facility_loc.count() > 0:
-                    text_around = await page.locator("body").inner_text()
-                    lines = text_around.split("\n")
+                try:
+                    # 左側の館名情報枠等から読み取る
+                    text_content = await page.locator("body").inner_text()
+                    lines = [line.strip() for line in text_content.split("\n") if line.strip()]
                     for idx, line in enumerate(lines):
                         if "館名" in line and idx + 1 < len(lines):
-                            next_line = lines[idx + 1].strip()
-                            if next_line and "所在地" not in next_line:
-                                facility_name = next_line
+                            target = lines[idx + 1]
+                            if target and "所在地" not in target and "電話" not in target:
+                                facility_name = target
                                 break
+                except Exception:
+                    pass
 
-                # 6. 空きコマ（午前・午後・夕方・夜間）の判定
-                # 画面内のすべてのテーブルセル（td）から「×」でなく、予約用アイコン（img/input）がある場所を特定
+                # 6. 「利用可能な施設と空き状況」テーブルの列解析
                 time_slots = ["午前", "午後", "夕方", "夜間"]
-                cells = await page.locator("td").all()
+                rows = await page.locator("table tr").all()
 
-                for cell in cells:
-                    cell_text = (await cell.inner_text()).strip()
-                    cell_html = await cell.inner_html()
+                for row in rows:
+                    cells = await row.locator("td").all()
+                    # テーブル行にtdセルが存在する場合
+                    if len(cells) > 0:
+                        for c_idx, cell in enumerate(cells):
+                            cell_html = await cell.inner_html()
+                            cell_text = await cell.inner_text()
 
-                    # 「×」や「予約不可」が含まれておらず、画像タグやカート入力が含まれている場合
-                    if "×" not in cell_text and "予約不可" not in cell_text and ("<img" in cell_html.lower() or "カート" in cell_html):
-                        # セルの周囲または属性から時間帯（午前・午後など）を特定
-                        found_slot = None
-                        for slot in time_slots:
-                            if slot in cell_html or slot in cell_text:
-                                found_slot = slot
-                                break
-                        
-                        if found_slot:
-                            found_today.append({
-                                "date": date_display,
-                                "facility": facility_name,
-                                "time_slot": found_slot
-                            })
+                            # 「×」や「予約不可」が含まれず、何らかの画像（img）や「予約可」「カート」に関連するHTML要素がある場合
+                            if "×" not in cell_text and "予約不可" not in cell_text and ("<img" in cell_html.lower() or "カート" in cell_html):
+                                # セルのインデックス（位置）から時間帯をマッピング
+                                slot_idx = c_idx % len(time_slots)
+                                slot_name = time_slots[slot_idx]
+                                found_today.append({
+                                    "date": date_display,
+                                    "facility": facility_name,
+                                    "time_slot": slot_name
+                                })
 
                 # 重複の除外
                 seen = set()
