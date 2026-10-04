@@ -64,63 +64,104 @@ def get_target_dates():
                 })
     return target_dates
 
-async def parse_current_facility(page, date_display, default_name="野球場"):
+async def parse_page_vacancies(page, date_display):
+    """ページ内の全テーブルを走査し、各施設の名前と空き時間を個別に抽出"""
     time_slots = ["午前", "午後", "夕方", "夜間"]
-    facility_name = ""
+    found_vacancies = []
 
-    # 1. 「館名」セルに隣接する値（例：西花苑公園野球場）をピンポイント取得
-    try:
-        for label in ["館名", "施設名", "施設"]:
-            kan_cell = page.locator(f"th:has-text('{label}'), td:has-text('{label}')").first
-            if await kan_cell.is_visible(timeout=800):
-                # 隣接する td セルを取得
-                next_td = kan_cell.locator("xpath=following-sibling::td[1]")
-                if await next_td.count() > 0:
-                    txt = (await next_td.inner_text()).strip()
-                    if txt and len(txt) > 1 and "所在地" not in txt:
-                        facility_name = txt
-                        break
-    except Exception:
-        pass
+    tables = await page.locator("table").all()
+    facility_counter = 0
 
-    # 2. バックアップ：正規表現検索
-    if not facility_name:
+    for table in tables:
+        table_text = await table.inner_text()
+        # 予約表以外のテーブルはスキップ
+        if not any(slot in table_text for slot in ["午前", "午後", "夕方", "夜間", "〇", "○", "空"]):
+            continue
+        if "ログイン" in table_text and "パスワード" in table_text:
+            continue
+
+        facility_counter += 1
+        facility_name = ""
+
+        # 1. テーブル内の th / td から施設名セルを抽出
         try:
-            body_text = await page.locator("body").inner_text()
-            matches = re.findall(r'([一-龥ぁ-んァ-ヶa-zA-Z0-90-９\-_]{2,20}(?:野球場|公園野球場|グラウンド|運動場))', body_text)
-            for m in matches:
-                if "検索" not in m and "利用" not in m and "案内" not in m and "凡例" not in m:
-                    facility_name = m.strip()
-                    break
+            cells = await table.locator("th, td").all()
+            for i, cell in enumerate(cells):
+                txt = (await cell.inner_text()).strip()
+                if txt in ["館名", "施設名", "施設", "施設名称"]:
+                    if i + 1 < len(cells):
+                        val = (await cells[i+1].inner_text()).strip()
+                        if val and len(val) > 1 and "所在地" not in val and "項目" not in val:
+                            facility_name = val
+                            break
         except Exception:
             pass
 
-    if not facility_name:
-        facility_name = default_name
+        # 2. テーブル内のテキストから施設名を正規表現検索
+        if not facility_name:
+            try:
+                matches = re.findall(r'([一-龥ぁ-んァ-ヶa-zA-Z0-90-９\-_]{2,20}(?:野球場|公園野球場|球場|グラウンド|運動場|広場))', table_text)
+                for m in matches:
+                    if not any(k in m for k in ["検索", "利用", "案内", "凡例", "注意事項", "選択"]):
+                        facility_name = m.strip()
+                        break
+            except Exception:
+                pass
 
-    found = []
-    rows = await page.locator("table tr").all()
-    for row in rows:
-        row_text = await row.inner_text()
-        if "凡例" in row_text or "お知らせ" in row_text or "館機能" in row_text:
-            continue
+        # 3. テーブル直前の HTML 要素テキストから施設名を検索
+        if not facility_name:
+            try:
+                prev_text = await page.evaluate("""(tbl) => {
+                    let elem = tbl.previousElementSibling;
+                    while (elem) {
+                        let txt = elem.innerText || '';
+                        if (txt.trim().length > 0) return txt;
+                        elem = elem.previousElementSibling;
+                    }
+                    return '';
+                }""", await table.element_handle())
+                if prev_text:
+                    m = re.search(r'([一-龥ぁ-んァ-ヶa-zA-Z0-90-９\-_]{2,20}(?:野球場|公園野球場|球場|グラウンド|運動場|広場))', prev_text)
+                    if m:
+                        facility_name = m.group(1).strip()
+            except Exception:
+                pass
 
-        cells = await row.locator("td").all()
-        if len(cells) == 4:
-            for c_idx in range(4):
-                cell = cells[c_idx]
-                c_text = await cell.inner_text()
-                c_html = await cell.inner_html()
+        if not facility_name:
+            facility_name = f"野球場_{facility_counter}"
 
-                if "×" not in c_text and "予約不可" not in c_text and "<img" in c_html.lower():
-                    if "hanrei" not in c_html.lower() and "legend" not in c_html.lower():
-                        found.append({
+        # テーブル内の行から空きコマを判定
+        rows = await table.locator("tr").all()
+        for row in rows:
+            r_text = await row.inner_text()
+            if "凡例" in r_text or "お知らせ" in r_text or "利用区分" in r_text:
+                continue
+
+            r_cells = await row.locator("td").all()
+            if len(r_cells) >= 4:
+                target_cells = r_cells[-4:]
+                for c_idx, cell in enumerate(target_cells):
+                    if c_idx >= 4:
+                        break
+                    c_text = await cell.inner_text()
+                    c_html = await cell.inner_html()
+
+                    is_open = False
+                    if "×" not in c_text and "不可" not in c_text and "休館" not in c_text:
+                        if "<img" in c_html.lower():
+                            if not any(x in c_html.lower() for x in ["hanrei", "legend", "batsu", "ng"]):
+                                is_open = True
+                        elif "○" in c_text or "〇" in c_text or "空" in c_text:
+                            is_open = True
+
+                    if is_open:
+                        found_vacancies.append({
                             "date": date_display,
                             "facility": facility_name,
                             "time_slot": time_slots[c_idx]
                         })
 
-    return found, facility_name
+    return found_vacancies
 
 async def main():
     target_dates = get_target_dates()
@@ -136,7 +177,7 @@ async def main():
             date_display = f"{item['date_str']}({item['weekday']}) {item['note']}".strip()
             print(f"[{date_display}] を確認中...", end="", flush=True)
             try:
-                # 1. トップページへアクセス
+                # 1. トップページアクセス
                 await page.goto("https://www.cm2.epss.jp/sendai/web/view/user/c019RsvEmptyState.html", timeout=60000)
                 await page.wait_for_load_state("domcontentloaded")
                 await asyncio.sleep(1)
@@ -169,7 +210,7 @@ async def main():
 
                 found_today_date = []
 
-                # 5. 施設巡回（ドロップダウンまたはページ送りボタン）
+                # 5. 施設ドロップダウンがある場合の切替処理
                 all_selects = await page.locator("select").all()
                 facility_select = None
                 for sel in all_selects:
@@ -186,9 +227,8 @@ async def main():
                     for opt_idx in range(len(options)):
                         opt_elem = options[opt_idx]
                         opt_value = await opt_elem.get_attribute("value")
-                        opt_text = (await opt_elem.inner_text()).strip()
-
                         await facility_select.select_option(value=opt_value)
+                        
                         change_btn = page.locator("input[value*='表示'], input[value*='変更'], button:has-text('表示'), button:has-text('変更')").first
                         if await change_btn.is_visible(timeout=800):
                             await change_btn.click()
@@ -196,19 +236,20 @@ async def main():
                         await page.wait_for_load_state("domcontentloaded")
                         await asyncio.sleep(0.8)
 
-                        v_list, f_name = await parse_current_facility(page, date_display, default_name=opt_text)
+                        v_list = await parse_page_vacancies(page, date_display)
                         found_today_date.extend(v_list)
                 else:
-                    for f_idx in range(15):
-                        v_list, f_name = await parse_current_facility(page, date_display, default_name=f"野球場_{f_idx+1}")
+                    # ページ送りボタンまたは単一/複数表示ページの巡回
+                    for page_idx in range(15):
+                        v_list = await parse_page_vacancies(page, date_display)
                         found_today_date.extend(v_list)
 
-                        # ページ送りボタンを検出・クリック
+                        # 次ページ・次施設への移動ボタン検索
                         next_clicked = False
                         next_selectors = [
-                            "input[value*='次']", "input[alt*='次']", "input[title*='次']",
-                            "button:has-text('次')", "a:has-text('次')", "a:has-text('次の施設')",
-                            "input[value*='館']", "button:has-text('館')", "a[href*='Next']", "a[href*='next']"
+                            "input[src*='next']", "input[src*='tsugi']", "input[alt*='次']", "input[title*='次']",
+                            "input[value*='次']", "button:has-text('次')", "a:has-text('次')", "a:has-text('＞')",
+                            "a:has-text('次の施設')", "input[value*='館']", "a[href*='Next']", "a[href*='next']"
                         ]
 
                         for selector in next_selectors:
@@ -224,24 +265,9 @@ async def main():
                                 continue
 
                         if not next_clicked:
-                            # 1回目のループでボタンが見つからなかった場合、画面上のボタン・リンク要素をデバッグログに出力
-                            if f_idx == 0 and item == target_dates[0]:
-                                try:
-                                    inputs = await page.locator("input, button, a").all()
-                                    input_info = []
-                                    for inp in inputs[:15]:
-                                        val = await inp.get_attribute("value") or ""
-                                        txt = await inp.inner_text() or ""
-                                        alt = await inp.get_attribute("alt") or ""
-                                        info = (val or txt or alt).strip().replace("\n", " ")
-                                        if info:
-                                            input_info.append(info)
-                                    print(f" [Debug:画面ボタン要素] {input_info[:8]}")
-                                except Exception:
-                                    pass
                             break
 
-                # 重複除外
+                # 重複判定・除外
                 seen = set()
                 unique_found = []
                 for f in found_today_date:
