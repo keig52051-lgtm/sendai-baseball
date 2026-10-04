@@ -110,41 +110,63 @@ async def main():
 
                 found_today = []
 
-                # 5. 施設名（球場名）の取得
+                # 5. 球場名（館名）の取得（画面左側の「館名」ブロックより抽出）
                 facility_name = "野球場"
                 try:
-                    text_content = await page.locator("body").inner_text()
-                    lines = [line.strip() for line in text_content.split("\n") if line.strip()]
-                    for idx, line in enumerate(lines):
-                        if "館名" in line and idx + 1 < len(lines):
-                            target = lines[idx + 1]
-                            if target and "所在地" not in target and "電話" not in target:
-                                facility_name = target
+                    left_box = page.locator("td:has-text('館名'), th:has-text('館名')").first
+                    if await left_box.is_visible(timeout=1000):
+                        box_text = await left_box.locator("xpath=../..").inner_text()
+                        for line in box_text.split("\n"):
+                            line_str = line.strip()
+                            if line_str and "館名" not in line_str and "所在地" not in line_str and "電話" not in line_str:
+                                facility_name = line_str
                                 break
                 except Exception:
                     pass
 
-                # 6. 画面内のすべてのテーブル行から「予約枠（4コマ構成）」を探索
+                # 6. 「利用可能な施設と空き状況」の表のみを特定して空きコマを厳密チェック
                 time_slots = ["午前", "午後", "夕方", "夜間"]
-                rows = await page.locator("table tr").all()
+                
+                # 凡例部分（「凡例：」という文字がある枠）を除外するため、メインの空き表セルのみを取得
+                main_cells = await page.locator("tr:has-text('午前') ~ tr td, table:has-text('午前') td").all()
 
-                for row in rows:
-                    cells = await row.locator("td").all()
-                    # 凡例部分やヘッダーを除外（1行内に4つ以上のtd要素があるコマ行を対象）
-                    if len(cells) >= 4:
-                        for c_idx in range(min(4, len(cells))):
-                            cell = cells[c_idx]
-                            cell_html = await cell.inner_html()
-                            cell_text = await cell.inner_text()
+                for cell in main_cells:
+                    cell_html = await cell.inner_html()
+                    cell_text = await cell.inner_text()
 
-                            # バツ(×)が含まれず、何らかの画像要素（img）が存在する場合を空きと判断
-                            if "×" not in cell_text and "予約不可" not in cell_text and "<img" in cell_html.lower():
-                                # 凡例アイコン（特定画像）などの誤検知を防ぐチェック
-                                if "凡例" not in cell_text and "お知らせ" not in cell_text:
+                    # 「凡例」の文字が含まれるセルは完全に無視
+                    if "凡例" in cell_text or "凡例" in cell_html:
+                        continue
+
+                    # 「×」が含まれず、かつ緑色の可否アイコン画像（img[alt*='可'] や img[src*='ok']、または input/カート要素）が存在する場合
+                    if "×" not in cell_text and "予約不可" not in cell_text and "<img" in cell_html.lower():
+                        # セルの周囲やインデックスからコマ名を判別
+                        for slot_idx, slot in enumerate(time_slots):
+                            if slot in cell_text or slot in cell_html:
+                                found_today.append({
+                                    "date": date_display,
+                                    "facility": facility_name,
+                                    "time_slot": slot
+                                })
+
+                # 位置ベース補完（文字でコマ名が拾えない場合、4コマ順番割り当て）
+                if not found_today:
+                    target_rows = await page.locator("table tr").all()
+                    for row in target_rows:
+                        row_text = await row.inner_text()
+                        if "凡例" in row_text or "お知らせ" in row_text:
+                            continue
+                        cells = await row.locator("td").all()
+                        if len(cells) == 4:
+                            for idx, c in enumerate(cells):
+                                c_html = await c.inner_html()
+                                c_text = await c.inner_text()
+                                # ✕でなく画像が入っているコマを判定
+                                if "×" not in c_text and "<img" in c_html.lower() and "不可" not in c_html:
                                     found_today.append({
                                         "date": date_display,
                                         "facility": facility_name,
-                                        "time_slot": time_slots[c_idx]
+                                        "time_slot": time_slots[idx]
                                     })
 
                 # 重複の除外
