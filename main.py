@@ -77,7 +77,7 @@ async def main():
             date_display = f"{item['date_str']}({item['weekday']}) {item['note']}".strip()
             print(f"[{date_display}] を確認中...", end="", flush=True)
             try:
-                # 1. トップページアクセス
+                # 1. トップページへアクセス
                 await page.goto("https://www.cm2.epss.jp/sendai/web/view/user/c019RsvEmptyState.html", timeout=60000)
                 await page.wait_for_load_state("domcontentloaded")
                 await asyncio.sleep(1)
@@ -101,7 +101,7 @@ async def main():
                     await selects.nth(1).select_option(value=item['month'])
                     await selects.nth(2).select_option(value=item['day'])
 
-                # 4. 検索ボタン押下
+                # 4. 検索実行
                 search_btn = page.locator("input[type='submit'], input[type='button'], button, a").filter(has_text="検索").first
                 if await search_btn.is_visible(timeout=2000):
                     await search_btn.click()
@@ -111,28 +111,38 @@ async def main():
                 found_today_date = []
                 time_slots = ["午前", "午後", "夕方", "夜間"]
 
-                # 5. 「次の施設」ボタンで全野球場をページ送り巡回（最大15施設）
+                # 5. 施設巡回ループ（最大15施設）
                 for f_idx in range(15):
-                    # --- 施設名（球場名）の抽出 ---
+                    # --- 施設名（球場名）のピンポイント取得 ---
                     facility_name = ""
                     try:
-                        left_box = page.locator("table:has-text('館名'), td:has-text('館名')").first
-                        if await left_box.is_visible(timeout=1000):
-                            text = await left_box.inner_text()
-                            lines = [l.strip() for l in text.split("\n") if l.strip()]
+                        # スクショ左側の「館名」見出しが含まれる親ボックス要素から直接文字を抽出
+                        kan_box = page.locator("*:has-text('館名')").filter(has_text="所在地").first
+                        if await kan_box.is_visible(timeout=1000):
+                            box_text = await kan_box.inner_text()
+                            lines = [l.strip() for l in box_text.split("\n") if l.strip()]
                             for idx, line in enumerate(lines):
                                 if "館名" in line and idx + 1 < len(lines):
-                                    target = lines[idx + 1]
-                                    if "所在地" not in target and "電話" not in target:
-                                        facility_name = target
+                                    candidate = lines[idx + 1]
+                                    if "所在地" not in candidate and "電話" not in candidate:
+                                        facility_name = candidate
                                         break
                     except Exception:
                         pass
 
                     if not facility_name:
+                        # 全体テキストからのフォールバック検索
+                        body_txt = await page.locator("body").inner_text()
+                        for line in body_txt.split("\n"):
+                            line_s = line.strip()
+                            if ("野球場" in line_s or "グラウンド" in line_s or "公園" in line_s) and "予約" not in line_s and "検索" not in line_s and "凡例" not in line_s:
+                                facility_name = line_s
+                                break
+
+                    if not facility_name:
                         facility_name = f"野球場_{f_idx+1}"
 
-                    # --- メイン空き状況テーブルの精査 ---
+                    # --- 空き状況判定 ---
                     rows = await page.locator("table tr").all()
                     for row in rows:
                         row_text = await row.inner_text()
@@ -146,7 +156,7 @@ async def main():
                                 c_text = await cell.inner_text()
                                 c_html = await cell.inner_html()
 
-                                if "×" not in c_text and "予約不可" not in c_text and "<img" in c_html.lower():
+                                if "×" not in c_text and "予約不可" not in c_text and "<img" in cell_html.lower():
                                     if "hanrei" not in c_html.lower() and "legend" not in c_html.lower():
                                         found_today_date.append({
                                             "date": date_display,
@@ -154,17 +164,21 @@ async def main():
                                             "time_slot": time_slots[c_idx]
                                         })
 
-                    # --- 次の施設ボタンの柔軟判定 ---
+                    # --- 次の施設／施設変更ボタンの全パターン判定 ---
                     next_clicked = False
-                    for selector in [
-                        "input[value*='次']", "input[alt*='次']",
-                        "button:has-text('次')", "a:has-text('次')",
-                        "a:has-text('次の施設')", "img[alt*='次']"
-                    ]:
+                    # 仙台市システム特有の「次へ」「次の施設」「別の館」ボタンパターン
+                    next_selectors = [
+                        "input[value*='次']", "button:has-text('次')",
+                        "a:has-text('次')", "a:has-text('次の施設')",
+                        "input[value*='館']", "button:has-text('館')",
+                        "form[name*='next'] input", "a[href*='Next']"
+                    ]
+                    
+                    for selector in next_selectors:
                         try:
-                            next_elem = page.locator(selector).first
-                            if await next_elem.is_visible(timeout=800):
-                                await next_elem.click()
+                            btn = page.locator(selector).first
+                            if await btn.is_visible(timeout=800):
+                                await btn.click()
                                 await page.wait_for_load_state("domcontentloaded")
                                 await asyncio.sleep(1)
                                 next_clicked = True
@@ -173,7 +187,7 @@ async def main():
                             continue
 
                     if not next_clicked:
-                        break  # 次の施設ボタンが無ければ巡回終了
+                        break  # 次の施設ボタンが見つからなければ巡回終了
 
                 # 重複の除外
                 seen = set()
