@@ -77,12 +77,12 @@ async def main():
             date_display = f"{item['date_str']}({item['weekday']}) {item['note']}".strip()
             print(f"[{date_display}] を確認中...", end="", flush=True)
             try:
-                # 1. 施設予約トップページへアクセス
+                # 1. トップページアクセス
                 await page.goto("https://www.cm2.epss.jp/sendai/web/view/user/c019RsvEmptyState.html", timeout=60000)
                 await page.wait_for_load_state("domcontentloaded")
                 await asyncio.sleep(1)
 
-                # 2. 野球カテゴリ選択
+                # 2. カテゴリ選択
                 for target_text in ["野球", "屋外スポーツ", "スポーツ"]:
                     try:
                         elem = page.locator(f"a:has-text('{target_text}'), input[value*='{target_text}'], button:has-text('{target_text}')").first
@@ -110,66 +110,42 @@ async def main():
 
                 found_today = []
 
-                # 5. 球場名（館名）の取得（画面左側の「館名」ブロックより抽出）
+                # 5. 球場名（館名）の厳格取得
                 facility_name = "野球場"
                 try:
-                    left_box = page.locator("td:has-text('館名'), th:has-text('館名')").first
-                    if await left_box.is_visible(timeout=1000):
-                        box_text = await left_box.locator("xpath=../..").inner_text()
-                        for line in box_text.split("\n"):
-                            line_str = line.strip()
-                            if line_str and "館名" not in line_str and "所在地" not in line_str and "電話" not in line_str:
-                                facility_name = line_str
+                    # 「館情報」や「館名」テーブルから球場名をピンポイント抽出
+                    kan_text = await page.locator("table:has-text('館名'), div:has-text('館名')").first.inner_text()
+                    lines = [l.strip() for l in kan_text.split("\n") if l.strip()]
+                    for idx, line in enumerate(lines):
+                        if "館名" in line and idx + 1 < len(lines):
+                            target = lines[idx + 1]
+                            if "所在地" not in target and "電話" not in target:
+                                facility_name = target
                                 break
                 except Exception:
                     pass
 
-                # 6. 「利用可能な施設と空き状況」の表のみを特定して空きコマを厳密チェック
+                # 6. 利用可能な施設と空き状況テーブルから正確に判定
                 time_slots = ["午前", "午後", "夕方", "夜間"]
-                
-                # 凡例部分（「凡例：」という文字がある枠）を除外するため、メインの空き表セルのみを取得
-                main_cells = await page.locator("tr:has-text('午前') ~ tr td, table:has-text('午前') td").all()
+                rows = await page.locator("table tr").all()
 
-                for cell in main_cells:
-                    cell_html = await cell.inner_html()
-                    cell_text = await cell.inner_text()
+                for row in rows:
+                    cells = await row.locator("td").all()
+                    if len(cells) == 4:
+                        for idx, cell in enumerate(cells):
+                            cell_html = await cell.inner_html()
+                            cell_text = await cell.inner_text()
 
-                    # 「凡例」の文字が含まれるセルは完全に無視
-                    if "凡例" in cell_text or "凡例" in cell_html:
-                        continue
-
-                    # 「×」が含まれず、かつ緑色の可否アイコン画像（img[alt*='可'] や img[src*='ok']、または input/カート要素）が存在する場合
-                    if "×" not in cell_text and "予約不可" not in cell_text and "<img" in cell_html.lower():
-                        # セルの周囲やインデックスからコマ名を判別
-                        for slot_idx, slot in enumerate(time_slots):
-                            if slot in cell_text or slot in cell_html:
-                                found_today.append({
-                                    "date": date_display,
-                                    "facility": facility_name,
-                                    "time_slot": slot
-                                })
-
-                # 位置ベース補完（文字でコマ名が拾えない場合、4コマ順番割り当て）
-                if not found_today:
-                    target_rows = await page.locator("table tr").all()
-                    for row in target_rows:
-                        row_text = await row.inner_text()
-                        if "凡例" in row_text or "お知らせ" in row_text:
-                            continue
-                        cells = await row.locator("td").all()
-                        if len(cells) == 4:
-                            for idx, c in enumerate(cells):
-                                c_html = await c.inner_html()
-                                c_text = await c.inner_text()
-                                # ✕でなく画像が入っているコマを判定
-                                if "×" not in c_text and "<img" in c_html.lower() and "不可" not in c_html:
+                            # 「×」や「予約不可」が含まれず、緑のチェックマークやカート追加アイコン(img)がある場合
+                            if "×" not in cell_text and "予約不可" not in cell_text and "<img" in cell_html.lower():
+                                if "凡例" not in cell_text:
                                     found_today.append({
                                         "date": date_display,
                                         "facility": facility_name,
                                         "time_slot": time_slots[idx]
                                     })
 
-                # 重複の除外
+                # 重複除外
                 seen = set()
                 unique_found = []
                 for f in found_today:
