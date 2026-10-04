@@ -64,158 +64,107 @@ def get_target_dates():
                 })
     return target_dates
 
-async def parse_and_debug_page(page, date_display):
-    time_slots = ["午前", "午後", "夕方", "夜間"]
-    found = []
-
-    # 1. 画面全体のテキスト構造を解析
-    body_text = await page.locator("body").inner_text()
-    
-    # 2. 空きアイコン・コマが存在するセルを直接検索
-    tables = await page.locator("table").all()
-    for table_idx, table in enumerate(tables):
-        rows = await table.locator("tr").all()
-        for row in rows:
-            row_text = await row.inner_text()
-            if "凡例" in row_text or "お知らせ" in row_text:
-                continue
-
-            cells = await row.locator("td").all()
-            if len(cells) == 4:
-                for c_idx in range(4):
-                    cell = cells[c_idx]
-                    c_text = await cell.inner_text()
-                    c_html = await cell.inner_html()
-
-                    if "×" not in c_text and "不可" not in c_text and ("<img" in c_html.lower() or "○" in c_text or "空" in c_text):
-                        if "hanrei" not in c_html.lower() and "legend" not in c_html.lower():
-                            found.append({
-                                "date": date_display,
-                                "facility": f"未定_{table_idx+1}",
-                                "time_slot": time_slots[c_idx],
-                                "table_elem": table
-                            })
-
-    # 空きが見つかった場合、該当画面のHTMLスナップショット（デバッグ用）を出力
-    if found:
-        print("\n" + "="*50)
-        print("【DEBUG: 空き枠検出画面のHTML解析ログ】")
-        # テーブル周辺のHTML構造を極力簡潔に出力
-        try:
-            html_snippet = await page.evaluate('''
-                () => {
-                    let result = [];
-                    let elems = document.querySelectorAll('h2, h3, h4, th, td, caption, div.title, .facility');
-                    elems.forEach(e => {
-                        let txt = e.innerText.trim().replace(/\\s+/g, ' ');
-                        if (txt.length > 0 && txt.length < 100) {
-                            result.push(`<${e.tagName.toLowerCase()} class="${e.className}"> ${txt} </${e.tagName.toLowerCase()}>`);
-                        }
-                    });
-                    return result.slice(0, 30).join("\\n");
-                }
-            ''')
-            print(html_snippet)
-        except Exception as e:
-            print(f"HTML解析エラー: {e}")
-        print("="*50 + "\n")
-
-    return found
-
 async def main():
     target_dates = get_target_dates()
     print(f"【検証開始】対象日付: 全 {len(target_dates)} 日間 (土日・祝日)\n")
-    all_vacancies = []
+    
+    # 最初の1日分で画面構造を完全特定
+    sample_date = target_dates[0]
+    date_display = f"{sample_date['date_str']}({sample_date['weekday']}) {sample_date['note']}".strip()
+    print(f"=== 画面解析デバッグ実行中 [{date_display}] ===")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
         context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         page = await context.new_page()
 
-        for item in target_dates:
-            date_display = f"{item['date_str']}({item['weekday']}) {item['note']}".strip()
-            print(f"[{date_display}] を確認中...", end="", flush=True)
-            try:
-                await page.goto("https://www.cm2.epss.jp/sendai/web/view/user/c019RsvEmptyState.html", timeout=60000)
-                await page.wait_for_load_state("domcontentloaded")
-                await asyncio.sleep(1)
+        try:
+            # 1. 初期ページ移動
+            await page.goto("https://www.cm2.epss.jp/sendai/web/view/user/c019RsvEmptyState.html", timeout=60000)
+            await page.wait_for_load_state("networkidle")
 
-                for target_text in ["野球", "屋外スポーツ", "スポーツ"]:
-                    try:
-                        elem = page.locator(f"a:has-text('{target_text}'), input[value*='{target_text}'], button:has-text('{target_text}')").first
-                        if await elem.is_visible(timeout=1500):
-                            await elem.click()
-                            await page.wait_for_load_state("domcontentloaded")
-                            await asyncio.sleep(1)
-                            break
-                    except Exception:
-                        continue
+            # 2. ページ内の全フォーム・アンカー要素の構造を出力
+            print("\n【解析1: 初期ページのフォーム・リンク構造】")
+            forms_info = await page.evaluate('''
+                () => {
+                    let info = [];
+                    document.querySelectorAll('form').forEach((f, i) => {
+                        info.push(`Form ${i}: action=${f.action}, id=${f.id}, name=${f.name}`);
+                    });
+                    document.querySelectorAll('a, input[type="button"], input[type="submit"]').forEach((e) => {
+                        let txt = e.innerText || e.value || e.alt || '';
+                        if (txt.includes('野球') || txt.includes('スポーツ') || txt.includes('屋外') || txt.includes('検索')) {
+                            info.push(`Elem: tag=${e.tagName}, text="${txt.trim()}", id=${e.id}, name=${e.name}, href=${e.href||''}`);
+                        }
+                    });
+                    return info.join("\\n");
+                }
+            ''')
+            print(forms_info)
 
-                selects = page.locator("select")
-                if await selects.count() >= 3:
-                    await selects.nth(0).select_option(value=item['year'])
-                    await selects.nth(1).select_option(value=item['month'])
-                    await selects.nth(2).select_option(value=item['day'])
-
-                search_btn = page.locator("input[type='submit'], input[type='button'], input[type='image'], button, a").filter(has_text="検索").first
-                if await search_btn.is_visible(timeout=2000):
-                    await search_btn.click()
-                    await page.wait_for_load_state("domcontentloaded")
-                    await asyncio.sleep(1.5)
-
-                found_today_date = []
-
-                for page_loop in range(15):
-                    v_list = await parse_and_debug_page(page, date_display)
-                    found_today_date.extend(v_list)
-
-                    next_clicked = False
-                    next_selectors = [
-                        "input[type='image'][alt*='次']", "input[type='image'][title*='次']",
-                        "img[alt*='次']", "a:has(img[alt*='次'])",
-                        "input[value*='次']", "input[alt*='次']", "input[name*='next']", "input[name*='Next']",
-                        "button:has-text('次')", "a:has-text('次')", "a:has-text('次の施設')", "a:has-text('次へ')"
-                    ]
-
-                    for selector in next_selectors:
-                        try:
-                            btn = page.locator(selector).first
-                            if await btn.is_visible(timeout=800):
-                                await btn.click()
-                                await page.wait_for_load_state("domcontentloaded")
-                                await asyncio.sleep(1)
-                                next_clicked = True
-                                break
-                        except Exception:
-                            continue
-
-                    if not next_clicked:
+            # 3. 野球/屋外スポーツカテゴリの確実なクリック試行
+            clicked = False
+            for selector in ["a:has-text('野球')", "a:has-text('屋外スポーツ')", "input[value*='野球']", "input[value*='屋外']"]:
+                try:
+                    elem = page.locator(selector).first
+                    if await elem.is_visible(timeout=1000):
+                        print(f"\n→ セレクター '{selector}' をクリックします")
+                        await elem.click()
+                        await page.wait_for_load_state("networkidle")
+                        clicked = True
                         break
+                except Exception:
+                    continue
 
-                seen = set()
-                unique_found = []
-                for f in found_today_date:
-                    key = (f['facility'], f['time_slot'])
-                    if key not in seen:
-                        seen.add(key)
-                        unique_found.append(f)
+            # 4. 日付の指定
+            selects = page.locator("select")
+            if await selects.count() >= 3:
+                await selects.nth(0).select_option(value=sample_date['year'])
+                await selects.nth(1).select_option(value=sample_date['month'])
+                await selects.nth(2).select_option(value=sample_date['day'])
 
-                if unique_found:
-                    details = ", ".join([f"【{x['facility']}】{x['time_slot']}" for x in unique_found])
-                    print(f" → ★空き {len(unique_found)} 件発見: {details}")
-                    all_vacancies.extend(unique_found)
-                else:
-                    print(" → 空きなし")
+            # 5. 検索実行
+            search_btn = page.locator("input[type='submit'], input[type='button'], input[type='image'], button").filter(has_text="検索").first
+            if await search_btn.is_visible(timeout=2000):
+                print("→ 検索ボタンをクリックします")
+                await search_btn.click()
+                await page.wait_for_load_state("networkidle")
+                await asyncio.sleep(2)
 
-            except Exception as ex:
-                print(f" → ⚠️ スキップ: {ex}")
-                continue
+            # 6. 遷移後の現在URLとHTMLスナップショットの保存・ログ出力
+            current_url = page.url
+            print(f"\n【解析2: 検索後のURL】\n{current_url}\n")
 
-        await browser.close()
+            # 画面上のタイトル・テーブルヘッダー・主要タグの抽出ログ
+            page_structure = await page.evaluate('''
+                () => {
+                    let res = [];
+                    res.push("=== TITLE / HEADERS ===");
+                    document.querySelectorAll('h1, h2, h3, h4, .title, .shisetsu_name, caption, th').forEach(e => {
+                        let t = e.innerText.trim();
+                        if (t.length > 0 && t.length < 100) {
+                            res.push(`<${e.tagName.toLowerCase()} class="${e.className}"> ${t}`);
+                        }
+                    });
+                    res.push("\\n=== TABLES COUNT ===");
+                    res.push(`Total tables: ${document.querySelectorAll('table').length}`);
+                    return res.join("\\n");
+                }
+            ''')
+            print("【解析3: 遷移後画面のDOM構造ログ】")
+            print(page_structure)
 
-    print(f"\n全巡回完了: 計 {len(all_vacancies)} 件の空き枠を検知")
-    if all_vacancies:
-        send_email_notification(all_vacancies)
+            # HTMLファイルとスクリーンショットを保存
+            html_content = await page.content()
+            with open("debug_search_result.html", "w", encoding="utf-8") as f:
+                f.write(html_content)
+            await page.screenshot(path="debug_search_result.png", full_page=True)
+            print("\n★ `debug_search_result.html` および `debug_search_result.png` を保存しました。")
+
+        except Exception as ex:
+            print(f"⚠️ エラー発生: {ex}")
+        finally:
+            await browser.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
