@@ -116,10 +116,10 @@ async def main():
                     # --- 施設名（球場名）のピンポイント取得 ---
                     facility_name = ""
                     try:
-                        # スクショ左側の「館名」見出しが含まれる親ボックス要素から直接文字を抽出
-                        kan_box = page.locator("*:has-text('館名')").filter(has_text="所在地").first
-                        if await kan_box.is_visible(timeout=1000):
-                            box_text = await kan_box.inner_text()
+                        kan_elem = page.locator("td:has-text('館名'), th:has-text('館名')").first
+                        if await kan_elem.is_visible(timeout=1000):
+                            parent_box = kan_elem.locator("xpath=../..")
+                            box_text = await parent_box.inner_text()
                             lines = [l.strip() for l in box_text.split("\n") if l.strip()]
                             for idx, line in enumerate(lines):
                                 if "館名" in line and idx + 1 < len(lines):
@@ -131,7 +131,6 @@ async def main():
                         pass
 
                     if not facility_name:
-                        # 全体テキストからのフォールバック検索
                         body_txt = await page.locator("body").inner_text()
                         for line in body_txt.split("\n"):
                             line_s = line.strip()
@@ -156,7 +155,8 @@ async def main():
                                 c_text = await cell.inner_text()
                                 c_html = await cell.inner_html()
 
-                                if "×" not in c_text and "予約不可" not in c_text and "<img" in cell_html.lower():
+                                # バツ(×)が含まれず、予約アイコン(img)が存在する場合を検知
+                                if "×" not in c_text and "予約不可" not in c_text and "<img" in c_html.lower():
                                     if "hanrei" not in c_html.lower() and "legend" not in c_html.lower():
                                         found_today_date.append({
                                             "date": date_display,
@@ -164,14 +164,13 @@ async def main():
                                             "time_slot": time_slots[c_idx]
                                         })
 
-                    # --- 次の施設／施設変更ボタンの全パターン判定 ---
+                    # --- 次の施設へ進むボタンの処理 ---
                     next_clicked = False
-                    # 仙台市システム特有の「次へ」「次の施設」「別の館」ボタンパターン
                     next_selectors = [
                         "input[value*='次']", "button:has-text('次')",
                         "a:has-text('次')", "a:has-text('次の施設')",
                         "input[value*='館']", "button:has-text('館')",
-                        "form[name*='next'] input", "a[href*='Next']"
+                        "a[href*='Next']"
                     ]
                     
                     for selector in next_selectors:
@@ -187,7 +186,7 @@ async def main():
                             continue
 
                     if not next_clicked:
-                        break  # 次の施設ボタンが見つからなければ巡回終了
+                        break  # 次の施設ボタンが無ければ巡回終了
 
                 # 重複の除外
                 seen = set()
