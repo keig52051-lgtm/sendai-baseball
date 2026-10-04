@@ -81,7 +81,7 @@ async def main():
                 await page.wait_for_load_state("domcontentloaded")
                 await asyncio.sleep(1)
 
-                # ナビゲーション選択
+                # 野球カテゴリを選択
                 for target_text in ["野球", "屋外スポーツ", "スポーツ"]:
                     try:
                         elem = page.locator(f"a:has-text('{target_text}'), input[value*='{target_text}'], button:has-text('{target_text}')").first
@@ -93,7 +93,7 @@ async def main():
                     except Exception:
                         continue
 
-                # 日付指定
+                # 年月日の選択
                 selects = page.locator("select")
                 if await selects.count() >= 3:
                     await selects.nth(0).select_option(value=item['year'])
@@ -108,45 +108,48 @@ async def main():
                     await asyncio.sleep(1.5)
 
                 found_today = []
-                
-                # 館名（施設名）の取得
-                facility_name = "野球場"
-                facility_elem = page.locator("th:has-text('館名'), td:has-text('館名')").first
-                if await facility_elem.is_visible(timeout=1000):
-                    parent_table = page.locator("table:has-text('館名')").first
-                    facility_name = (await parent_table.inner_text()).replace("館名", "").strip().split("\n")[0]
 
-                # 空き状況テーブルの解析（× 以外の画像や要素があるセルを探す）
-                cells = await page.locator("table td").all()
+                # 施設名（球場名）を取得：画面左側の「館名」枠、またはテーブル内の施設名テキストを探す
+                facility_name = ""
+                try:
+                    # 左側ナビゲーション/館名テーブルの抽出
+                    facility_box = page.locator("td:has-text('館名'), th:has-text('館名'), div:has-text('館名')").first
+                    if await facility_box.is_visible(timeout=1000):
+                        parent_text = await facility_box.locator("xpath=..").inner_text()
+                        lines = [line.strip() for line in parent_text.split("\n") if line.strip()]
+                        for line in lines:
+                            if "館名" not in line and "所在地" not in line and "電話" not in line:
+                                facility_name = line
+                                break
+                except Exception:
+                    pass
+
+                if not facility_name:
+                    facility_name = "仙台市内野球場"
+
+                # 空き状況テーブル（利用可能な施設と空き状況）から列とステータスを精密判定
                 time_slots = ["午前", "午後", "夕方", "夜間"]
+                target_table = page.locator("table:has-text('利用可能な施設と空き状況')").first
+                
+                if await target_table.is_visible(timeout=1000):
+                    # テーブル内の各TDセルを検証
+                    tds = await target_table.locator("td").all()
+                    for idx, td in enumerate(tds):
+                        inner_html = await td.inner_html()
+                        inner_text = await td.inner_text()
 
-                for cell in cells:
-                    html_content = await cell.inner_html()
-                    text_content = await cell.inner_text()
+                        # バツ(×)や休館でなく、予約可能アイコン（カート追加・チェックマーク等）が存在する場合
+                        if "×" not in inner_text and ("img" in inner_html.lower() or "○" in inner_text):
+                            # 何番目の時間帯枠か判定
+                            slot_idx = idx % len(time_slots)
+                            slot_name = time_slots[slot_idx]
+                            found_today.append({
+                                "date": date_display,
+                                "facility": facility_name,
+                                "time_slot": slot_name
+                            })
 
-                    # 「×（予約不可）」ではなく、かつ何らかの画像(img)が含まれている場合は空き枠と判定
-                    if "×" not in text_content and "<img" in html_content.lower():
-                        # インプットやリンク等から時間帯のインデックスを推測
-                        for idx, slot in enumerate(time_slots):
-                            if slot in html_content or slot in text_content:
-                                found_today.append({
-                                    "date": date_display,
-                                    "facility": facility_name,
-                                    "time_slot": slot
-                                })
-
-                # 万が一時間帯のテキストが取れなかった場合は、画像があるセル順で補完
-                if not found_today:
-                    valid_imgs = await page.locator("table td img:not([src*='ng']):not([alt*='不可'])").all()
-                    for idx, img in enumerate(valid_imgs):
-                        slot = time_slots[min(idx, len(time_slots) - 1)]
-                        found_today.append({
-                            "date": date_display,
-                            "facility": facility_name,
-                            "time_slot": slot
-                        })
-
-                # 重複除去
+                # 重複の除外
                 seen = set()
                 unique_found = []
                 for f in found_today:
@@ -156,7 +159,8 @@ async def main():
                         unique_found.append(f)
 
                 if unique_found:
-                    print(f" → ★空き {len(unique_found)} 件発見")
+                    fac_summary = unique_found[0]['facility']
+                    print(f" → ★【{fac_summary}】空き {len(unique_found)} 件発見")
                     all_vacancies.extend(unique_found)
                 else:
                     print(" → 空きなし")
