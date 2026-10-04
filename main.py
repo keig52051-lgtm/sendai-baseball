@@ -124,27 +124,27 @@ async def main():
                 except Exception:
                     pass
 
-                # 6. 「利用可能な施設と空き状況」エリア内のテーブルに限定して判定
+                # 6. 画面内のすべてのテーブル行から「予約枠（4コマ構成）」を探索
                 time_slots = ["午前", "午後", "夕方", "夜間"]
-                target_table = page.locator("table").filter(has_text="利用可能な施設と空き状況").first
+                rows = await page.locator("table tr").all()
 
-                if await target_table.is_visible(timeout=2000):
-                    rows = await target_table.locator("tr").all()
-                    for row in rows:
-                        cells = await row.locator("td").all()
-                        # 空き状況テーブル（4つのコマが入る行）を検出
-                        if len(cells) >= 4:
-                            for c_idx, cell in enumerate(cells[:4]):
-                                cell_html = await cell.inner_html()
-                                cell_text = await cell.inner_text()
+                for row in rows:
+                    cells = await row.locator("td").all()
+                    # 凡例部分やヘッダーを除外（1行内に4つ以上のtd要素があるコマ行を対象）
+                    if len(cells) >= 4:
+                        for c_idx in range(min(4, len(cells))):
+                            cell = cells[c_idx]
+                            cell_html = await cell.inner_html()
+                            cell_text = await cell.inner_text()
 
-                                # 「×」を含まず、かつ画像要素（img）が存在する、または「予約」要素がある枠を空きと判定
-                                if "×" not in cell_text and "予約不可" not in cell_text and "<img" in cell_html.lower():
-                                    slot_name = time_slots[c_idx]
+                            # バツ(×)が含まれず、何らかの画像要素（img）が存在する場合を空きと判断
+                            if "×" not in cell_text and "予約不可" not in cell_text and "<img" in cell_html.lower():
+                                # 凡例アイコン（特定画像）などの誤検知を防ぐチェック
+                                if "凡例" not in cell_text and "お知らせ" not in cell_text:
                                     found_today.append({
                                         "date": date_display,
                                         "facility": facility_name,
-                                        "time_slot": slot_name
+                                        "time_slot": time_slots[c_idx]
                                     })
 
                 # 重複の除外
