@@ -77,11 +77,12 @@ async def main():
             date_display = f"{item['date_str']}({item['weekday']}) {item['note']}".strip()
             print(f"[{date_display}] を確認中...", end="", flush=True)
             try:
+                # 1. ページ読み込み
                 await page.goto("https://www.cm2.epss.jp/sendai/web/view/user/c019RsvEmptyState.html", timeout=60000)
                 await page.wait_for_load_state("domcontentloaded")
                 await asyncio.sleep(1)
 
-                # 野球カテゴリを選択
+                # 2. 野球カテゴリ選択
                 for target_text in ["野球", "屋外スポーツ", "スポーツ"]:
                     try:
                         elem = page.locator(f"a:has-text('{target_text}'), input[value*='{target_text}'], button:has-text('{target_text}')").first
@@ -93,60 +94,59 @@ async def main():
                     except Exception:
                         continue
 
-                # 年月日の選択
+                # 3. 日付の指定
                 selects = page.locator("select")
                 if await selects.count() >= 3:
                     await selects.nth(0).select_option(value=item['year'])
                     await selects.nth(1).select_option(value=item['month'])
                     await selects.nth(2).select_option(value=item['day'])
 
-                # 検索ボタン押下
+                # 4. 検索ボタン押下
                 search_btn = page.locator("input[type='submit'], input[type='button'], button, a").filter(has_text="検索").first
                 if await search_btn.is_visible(timeout=2000):
                     await search_btn.click()
                     await page.wait_for_load_state("domcontentloaded")
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(2)
 
                 found_today = []
 
-                # 施設名（球場名）を取得：画面左側の「館名」枠、またはテーブル内の施設名テキストを探す
-                facility_name = ""
-                try:
-                    # 左側ナビゲーション/館名テーブルの抽出
-                    facility_box = page.locator("td:has-text('館名'), th:has-text('館名'), div:has-text('館名')").first
-                    if await facility_box.is_visible(timeout=1000):
-                        parent_text = await facility_box.locator("xpath=..").inner_text()
-                        lines = [line.strip() for line in parent_text.split("\n") if line.strip()]
-                        for line in lines:
-                            if "館名" not in line and "所在地" not in line and "電話" not in line:
-                                facility_name = line
+                # 5. 施設名（球場名）の取得
+                facility_name = "野球場"
+                # 画面内の「館名」ラベルまたは「館内の施設一覧」から施設名を検索
+                facility_loc = page.locator("td:has-text('館名'), th:has-text('館名'), div:has-text('館名')")
+                if await facility_loc.count() > 0:
+                    text_around = await page.locator("body").inner_text()
+                    lines = text_around.split("\n")
+                    for idx, line in enumerate(lines):
+                        if "館名" in line and idx + 1 < len(lines):
+                            next_line = lines[idx + 1].strip()
+                            if next_line and "所在地" not in next_line:
+                                facility_name = next_line
                                 break
-                except Exception:
-                    pass
 
-                if not facility_name:
-                    facility_name = "仙台市内野球場"
-
-                # 空き状況テーブル（利用可能な施設と空き状況）から列とステータスを精密判定
+                # 6. 空きコマ（午前・午後・夕方・夜間）の判定
+                # 画面内のすべてのテーブルセル（td）から「×」でなく、予約用アイコン（img/input）がある場所を特定
                 time_slots = ["午前", "午後", "夕方", "夜間"]
-                target_table = page.locator("table:has-text('利用可能な施設と空き状況')").first
-                
-                if await target_table.is_visible(timeout=1000):
-                    # テーブル内の各TDセルを検証
-                    tds = await target_table.locator("td").all()
-                    for idx, td in enumerate(tds):
-                        inner_html = await td.inner_html()
-                        inner_text = await td.inner_text()
+                cells = await page.locator("td").all()
 
-                        # バツ(×)や休館でなく、予約可能アイコン（カート追加・チェックマーク等）が存在する場合
-                        if "×" not in inner_text and ("img" in inner_html.lower() or "○" in inner_text):
-                            # 何番目の時間帯枠か判定
-                            slot_idx = idx % len(time_slots)
-                            slot_name = time_slots[slot_idx]
+                for cell in cells:
+                    cell_text = (await cell.inner_text()).strip()
+                    cell_html = await cell.inner_html()
+
+                    # 「×」や「予約不可」が含まれておらず、画像タグやカート入力が含まれている場合
+                    if "×" not in cell_text and "予約不可" not in cell_text and ("<img" in cell_html.lower() or "カート" in cell_html):
+                        # セルの周囲または属性から時間帯（午前・午後など）を特定
+                        found_slot = None
+                        for slot in time_slots:
+                            if slot in cell_html or slot in cell_text:
+                                found_slot = slot
+                                break
+                        
+                        if found_slot:
                             found_today.append({
                                 "date": date_display,
                                 "facility": facility_name,
-                                "time_slot": slot_name
+                                "time_slot": found_slot
                             })
 
                 # 重複の除外
@@ -159,8 +159,7 @@ async def main():
                         unique_found.append(f)
 
                 if unique_found:
-                    fac_summary = unique_found[0]['facility']
-                    print(f" → ★【{fac_summary}】空き {len(unique_found)} 件発見")
+                    print(f" → ★【{unique_found[0]['facility']}】空き {len(unique_found)} 件発見")
                     all_vacancies.extend(unique_found)
                 else:
                     print(" → 空きなし")
