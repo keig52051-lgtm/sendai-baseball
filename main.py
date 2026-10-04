@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import smtplib
 from email.mime.text import MIMEText
 from datetime import date
@@ -74,7 +75,6 @@ async def parse_page_facilities(page, date_display):
             continue
 
         facility_name = ""
-        # 施設名の抽出
         title_elems = await table.locator("caption, th, td.tbl_title, .shisetsu_name").all()
         for elem in title_elems:
             txt = (await elem.inner_text()).strip()
@@ -85,7 +85,6 @@ async def parse_page_facilities(page, date_display):
         if not facility_name:
             continue
 
-        # コマの空き判定
         rows = await table.locator("tr").all()
         for row in rows:
             row_text = await row.inner_text()
@@ -129,34 +128,30 @@ async def main():
             date_display = f"{item['date_str']}({item['weekday']}) {item['note']}".strip()
             print(f"[{date_display}] を確認中...", end="", flush=True)
             try:
-                # 1. ページロード
                 await page.goto("https://www.cm2.epss.jp/sendai/web/view/user/c019RsvEmptyState.html", timeout=60000)
                 await page.wait_for_load_state("domcontentloaded")
                 await asyncio.sleep(1)
 
-                # 2. 野球場の空き照会フォームの直接JavaScriptトリガー実行（システム内部関数を直接叩く）
-                # 仙台市予約システムで「野球・屋外運動場」に該当するフォームアクションを直接実行する
-                success = await page.evaluate(f'''
-                    () => {{
-                        try {{
-                            // フォームまたは検索イベントを直接呼び出す
-                            if (typeof doSearch === 'function') {{
-                                document.getElementById('year').value = '{item['year']}';
-                                document.getElementById('month').value = '{item['month']}';
-                                document.getElementById('day').value = '{item['day']}';
+                # Playwrightの引数渡しを利用してJavaScriptを安全に実行
+                success = await page.evaluate(
+                    """({ year, month, day }) => {
+                        try {
+                            if (typeof doSearch === 'function') {
+                                document.getElementById('year').value = year;
+                                document.getElementById('month').value = month;
+                                document.getElementById('day').value = day;
                                 doSearch();
                                 return true;
-                            }}
+                            }
                             return false;
-                        } catch (e) {{
+                        } catch (e) {
                             return false;
-                        }}
-                    }}
-                ''')
+                        }
+                    }""",
+                    {"year": item['year'], "month": item['month'], "day": item['day']}
+                )
 
-                # もしJS関数直接呼び出しができない場合は通常の確実なフォーム選択を行う
                 if not success:
-                    # 「屋外スポーツ」または「野球」のリンク・ボタンを正確に狙い撃ち
                     links = await page.locator("a, area, button, input").all()
                     for l in links:
                         try:
@@ -177,7 +172,6 @@ async def main():
                         await selects.nth(1).select_option(value=item['month'])
                         await selects.nth(2).select_option(value=item['day'])
 
-                    # 検索ボタンのクリック
                     search_btn = page.locator("input[type='image'], input[type='submit'], button").filter(has_text="検索").first
                     if await search_btn.count() > 0:
                         await search_btn.click()
@@ -192,7 +186,6 @@ async def main():
                     v_list = await parse_page_facilities(page, date_display)
                     found_today_date.extend(v_list)
 
-                    # 次の施設ボタン
                     next_btn = page.locator("input[type='image'][alt*='次'], input[value*='次'], a:has-text('次へ')").first
                     if await next_btn.is_visible(timeout=500):
                         await next_btn.click()
@@ -201,7 +194,6 @@ async def main():
                     else:
                         break
 
-                # 重複排除
                 seen = set()
                 unique_found = []
                 for f in found_today_date:
