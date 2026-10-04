@@ -106,14 +106,13 @@ async def main():
                 if await search_btn.is_visible(timeout=2000):
                     await search_btn.click()
                     await page.wait_for_load_state("domcontentloaded")
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(1.5)
 
                 found_today = []
 
                 # 5. 施設名（球場名）の取得
                 facility_name = "野球場"
                 try:
-                    # 左側の館名情報枠等から読み取る
                     text_content = await page.locator("body").inner_text()
                     lines = [line.strip() for line in text_content.split("\n") if line.strip()]
                     for idx, line in enumerate(lines):
@@ -125,28 +124,28 @@ async def main():
                 except Exception:
                     pass
 
-                # 6. 「利用可能な施設と空き状況」テーブルの列解析
+                # 6. 「利用可能な施設と空き状況」エリア内のテーブルに限定して判定
                 time_slots = ["午前", "午後", "夕方", "夜間"]
-                rows = await page.locator("table tr").all()
+                target_table = page.locator("table").filter(has_text="利用可能な施設と空き状況").first
 
-                for row in rows:
-                    cells = await row.locator("td").all()
-                    # テーブル行にtdセルが存在する場合
-                    if len(cells) > 0:
-                        for c_idx, cell in enumerate(cells):
-                            cell_html = await cell.inner_html()
-                            cell_text = await cell.inner_text()
+                if await target_table.is_visible(timeout=2000):
+                    rows = await target_table.locator("tr").all()
+                    for row in rows:
+                        cells = await row.locator("td").all()
+                        # 空き状況テーブル（4つのコマが入る行）を検出
+                        if len(cells) >= 4:
+                            for c_idx, cell in enumerate(cells[:4]):
+                                cell_html = await cell.inner_html()
+                                cell_text = await cell.inner_text()
 
-                            # 「×」や「予約不可」が含まれず、何らかの画像（img）や「予約可」「カート」に関連するHTML要素がある場合
-                            if "×" not in cell_text and "予約不可" not in cell_text and ("<img" in cell_html.lower() or "カート" in cell_html):
-                                # セルのインデックス（位置）から時間帯をマッピング
-                                slot_idx = c_idx % len(time_slots)
-                                slot_name = time_slots[slot_idx]
-                                found_today.append({
-                                    "date": date_display,
-                                    "facility": facility_name,
-                                    "time_slot": slot_name
-                                })
+                                # 「×」を含まず、かつ画像要素（img）が存在する、または「予約」要素がある枠を空きと判定
+                                if "×" not in cell_text and "予約不可" not in cell_text and "<img" in cell_html.lower():
+                                    slot_name = time_slots[c_idx]
+                                    found_today.append({
+                                        "date": date_display,
+                                        "facility": facility_name,
+                                        "time_slot": slot_name
+                                    })
 
                 # 重複の除外
                 seen = set()
@@ -158,7 +157,8 @@ async def main():
                         unique_found.append(f)
 
                 if unique_found:
-                    print(f" → ★【{unique_found[0]['facility']}】空き {len(unique_found)} 件発見")
+                    slots_str = ", ".join([f['time_slot'] for f in unique_found])
+                    print(f" → ★【{unique_found[0]['facility']}】空き {len(unique_found)} 件 ({slots_str})")
                     all_vacancies.extend(unique_found)
                 else:
                     print(" → 空きなし")
