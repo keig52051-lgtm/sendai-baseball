@@ -77,7 +77,7 @@ async def main():
             date_display = f"{item['date_str']}({item['weekday']}) {item['note']}".strip()
             print(f"[{date_display}] を確認中...", end="", flush=True)
             try:
-                # 1. トップページへアクセス
+                # 1. トップページアクセス
                 await page.goto("https://www.cm2.epss.jp/sendai/web/view/user/c019RsvEmptyState.html", timeout=60000)
                 await page.wait_for_load_state("domcontentloaded")
                 await asyncio.sleep(1)
@@ -94,14 +94,14 @@ async def main():
                     except Exception:
                         continue
 
-                # 3. 日付（年月日）の選択
+                # 3. 日付選択
                 selects = page.locator("select")
                 if await selects.count() >= 3:
                     await selects.nth(0).select_option(value=item['year'])
                     await selects.nth(1).select_option(value=item['month'])
                     await selects.nth(2).select_option(value=item['day'])
 
-                # 4. 検索実行
+                # 4. 検索ボタン押下
                 search_btn = page.locator("input[type='submit'], input[type='button'], button, a").filter(has_text="検索").first
                 if await search_btn.is_visible(timeout=2000):
                     await search_btn.click()
@@ -116,7 +116,6 @@ async def main():
                     # --- 施設名（球場名）の抽出 ---
                     facility_name = ""
                     try:
-                        # 左側エリアの「館名」テーブルから読み取る
                         left_box = page.locator("table:has-text('館名'), td:has-text('館名')").first
                         if await left_box.is_visible(timeout=1000):
                             text = await left_box.inner_text()
@@ -134,27 +133,20 @@ async def main():
                         facility_name = f"野球場_{f_idx+1}"
 
                     # --- メイン空き状況テーブルの精査 ---
-                    # 凡例エリア（「凡例」というテキストが含まれるテーブル/div）を除外して抽出
                     rows = await page.locator("table tr").all()
                     for row in rows:
                         row_text = await row.inner_text()
-                        row_html = await row.inner_html()
-
-                        # 凡例・お知らせ行を厳重に除外
                         if "凡例" in row_text or "お知らせ" in row_text or "館機能" in row_text:
                             continue
 
                         cells = await row.locator("td").all()
-                        # 空き枠テーブル行（4コマ配置）の判定
                         if len(cells) == 4:
                             for c_idx in range(4):
                                 cell = cells[c_idx]
                                 c_text = await cell.inner_text()
                                 c_html = await cell.inner_html()
 
-                                # 「✕」や「不可」がなく、予約アイコン（img）が存在する場合
                                 if "×" not in c_text and "予約不可" not in c_text and "<img" in c_html.lower():
-                                    # 凡例画像でないことを最終確認
                                     if "hanrei" not in c_html.lower() and "legend" not in c_html.lower():
                                         found_today_date.append({
                                             "date": date_display,
@@ -162,14 +154,26 @@ async def main():
                                             "time_slot": time_slots[c_idx]
                                         })
 
-                    # 次の施設へ進むボタンがあるか確認してクリック
-                    next_btn = page.locator("input[value*='次'], button:has-text('次'), a:has-text('次の施設')").first
-                    if await next_btn.is_visible(timeout=1000):
-                        await next_btn.click()
-                        await page.wait_for_load_state("domcontentloaded")
-                        await asyncio.sleep(1)
-                    else:
-                        break  # 次の施設がなければその日程の巡回終了
+                    # --- 次の施設ボタンの柔軟判定 ---
+                    next_clicked = False
+                    for selector in [
+                        "input[value*='次']", "input[alt*='次']",
+                        "button:has-text('次')", "a:has-text('次')",
+                        "a:has-text('次の施設')", "img[alt*='次']"
+                    ]:
+                        try:
+                            next_elem = page.locator(selector).first
+                            if await next_elem.is_visible(timeout=800):
+                                await next_elem.click()
+                                await page.wait_for_load_state("domcontentloaded")
+                                await asyncio.sleep(1)
+                                next_clicked = True
+                                break
+                        except Exception:
+                            continue
+
+                    if not next_clicked:
+                        break  # 次の施設ボタンが無ければ巡回終了
 
                 # 重複の除外
                 seen = set()
@@ -181,8 +185,8 @@ async def main():
                         unique_found.append(f)
 
                 if unique_found:
-                    fac_set = set([x['facility'] for x in unique_found])
-                    print(f" → ★【{len(fac_set)}施設で空き検知】 計 {len(unique_found)} 件")
+                    details = ", ".join([f"【{x['facility']}】{x['time_slot']}" for x in unique_found])
+                    print(f" → ★空き {len(unique_found)} 件発見: {details}")
                     all_vacancies.extend(unique_found)
                 else:
                     print(" → 空きなし")
